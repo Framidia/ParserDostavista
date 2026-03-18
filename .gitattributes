@@ -1,0 +1,30 @@
+* text=auto
+
+# Source code
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+
+# Config files
+.env.example text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Python
+*.pyc binary
+*.pyo binary
+*.pyd binary
+__pycache__/ binary
+
+# Virtual env
+.venv/ binary
+venv/ binary
+
+# Logs
+*.log text eol=lf

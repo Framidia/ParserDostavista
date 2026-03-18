@@ -58,16 +58,23 @@ class TelegramClient:
         text: str,
         button_url: str | None = None,
         accept_callback_data: str | None = None,
+        extra_callback_button: tuple[str, str] | None = None,
+        parse_mode: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {
             "chat_id": self._config.telegram_chat_id,
             "text": text,
             "disable_web_page_preview": True,
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
 
         keyboard: list[list[dict[str, Any]]] = []
         if accept_callback_data:
             keyboard.append([{"text": "Принять заказ", "callback_data": accept_callback_data}])
+        if extra_callback_button:
+            button_text, callback_data = extra_callback_button
+            keyboard.append([{"text": button_text, "callback_data": callback_data}])
         if button_url:
             keyboard.append([{"text": "Открыть в Яндекс.Картах", "url": button_url}])
         if keyboard:
@@ -93,6 +100,14 @@ class TelegramClient:
         if text:
             payload["text"] = text
         self._request("POST", "answerCallbackQuery", json=payload)
+
+    def set_commands(self, commands: list[tuple[str, str]]) -> None:
+        payload = {
+            "commands": [
+                {"command": command, "description": description} for command, description in commands
+            ]
+        }
+        self._request("POST", "setMyCommands", json=payload)
 
 
 def build_yandex_maps_url(pickup: str, delivery: str) -> str:

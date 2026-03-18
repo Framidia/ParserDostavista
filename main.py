@@ -241,6 +241,39 @@ def send_all_orders(telegram: TelegramClient, latest_orders: list[dict[str, Any]
         telegram.send_message(message, maps_url, accept_data, parse_mode="HTML")
 
 
+def refresh_latest_orders(
+    client: DostavistaClient,
+    config: Config,
+    log: logging.Logger,
+    latest_orders: list[dict[str, Any]],
+) -> bool:
+    try:
+        response = client.fetch_available_orders()
+    except requests.RequestException as exc:
+        log.warning("Manual orders fetch error: %s", exc)
+        return False
+
+    if response.new_session and response.new_session != client.session_value:
+        client.update_session(response.new_session)
+        save_session(config.session_cache_path, response.new_session)
+        if response.session_source:
+            log.info("Session updated and cached (source=%s)", response.session_source)
+        else:
+            log.info("Session updated and cached")
+
+    if response.status_code in (401, 403) or not response.is_successful:
+        log.warning("Manual orders fetch failed (session invalid, status=%s)", response.status_code)
+        return False
+
+    if response.status_code != 200:
+        log.warning("Manual orders fetch failed (status=%s)", response.status_code)
+        return False
+
+    latest_orders.clear()
+    latest_orders.extend(response.orders)
+    return True
+
+
 def handle_telegram_updates(
     telegram: TelegramClient,
     client: DostavistaClient,
@@ -265,7 +298,13 @@ def handle_telegram_updates(
             text = str(message.get("text") or "").strip()
             command = text.split()[0] if text else ""
             if command.startswith("/orders"):
-                send_all_orders(telegram, latest_orders)
+                refreshed = refresh_latest_orders(client, config, log, latest_orders)
+                if not refreshed:
+                    telegram.send_message(
+                        "Не удалось получить список заказов. Проверьте сессию или сеть."
+                    )
+                else:
+                    send_all_orders(telegram, latest_orders)
                 continue
 
         callback = update.get("callback_query")
@@ -278,7 +317,13 @@ def handle_telegram_updates(
         if data == "show_all":
             if callback_id:
                 telegram.answer_callback_query(callback_id, "Отправляю список...")
-            send_all_orders(telegram, latest_orders)
+            refreshed = refresh_latest_orders(client, config, log, latest_orders)
+            if not refreshed:
+                telegram.send_message(
+                    "Не удалось получить список заказов. Проверьте сессию или сеть."
+                )
+            else:
+                send_all_orders(telegram, latest_orders)
             continue
 
         if data.startswith("accept:"):
@@ -311,7 +356,7 @@ def handle_telegram_updates(
                 else:
                     log.info("Session updated and cached")
 
-            if response.is_successful:
+            if response.status_code == 200 and response.is_successful:
                 telegram.send_message(f"Заказ {order_id} принят.")
             else:
                 error_text = None
@@ -395,8 +440,8 @@ def main() -> None:
                 else:
                     log.info("Session updated and cached")
 
-            if not response.is_successful:
-                log.warning("API reported is_successful=false (status=%s)", response.status_code)
+            if response.status_code in (401, 403) or not response.is_successful:
+                log.warning("Session invalid (status=%s)", response.status_code)
                 now = time.time()
                 if now - last_session_alert_ts > 60:
                     telegram.send_message(
@@ -404,6 +449,9 @@ def main() -> None:
                         "Обновите x-dv-session через mitmproxy."
                     )
                     last_session_alert_ts = now
+                continue
+
+            if response.status_code != 200:
                 continue
 
             latest_orders = response.orders
@@ -418,7 +466,7 @@ def main() -> None:
                 passes, price, distance_m = order_passes_filters(order, config)
                 seen_orders.add(order_id)
 
-                if not passes:
+                if not config.show_all_orders and not passes:
                     continue
 
                 pickup, delivery = extract_addresses(order)

@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+import os
 from pathlib import Path
+import tempfile
 
 
 def load_session(path: str) -> str | None:
@@ -13,4 +15,15 @@ def load_session(path: str) -> str | None:
 
 def save_session(path: str, session: str) -> None:
     file_path = Path(path)
-    file_path.write_text(session.strip(), encoding="utf-8")
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(
+        "w",
+        delete=False,
+        encoding="utf-8",
+        dir=str(file_path.parent),
+    ) as tmp:
+        tmp.write(session.strip())
+        tmp_path = tmp.name
+
+    os.replace(tmp_path, file_path)

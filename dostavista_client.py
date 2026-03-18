@@ -42,6 +42,26 @@ class DostavistaClient:
     def update_session(self, new_session: str) -> None:
         self._session_value = new_session
 
+    @staticmethod
+    def _is_valid_session(session: str | None) -> bool:
+        return isinstance(session, str) and len(session) == 32
+
+    def _extract_session(self, resp: requests.Response, raw: dict[str, Any] | None) -> tuple[str | None, str | None]:
+        header_session = (
+            resp.headers.get("x-dv-session")
+            or resp.headers.get("X-Dv-Session")
+            or resp.headers.get("X-DV-Session")
+        )
+        body_session = None
+        if raw and isinstance(raw, dict):
+            body_session = raw.get("session")
+
+        # priority: header
+        candidate = header_session or body_session
+        if self._is_valid_session(candidate):
+            return candidate, ("header" if header_session else "body")
+        return None, None
+
     def fetch_available_orders(self) -> AvailableOrdersResponse:
         headers = {
             "x-dv-device-id": self._config.device_id,
@@ -59,16 +79,8 @@ class DostavistaClient:
             timeout=self._config.http_timeout_seconds,
         )
 
-        header_session = (
-            resp.headers.get("x-dv-session")
-            or resp.headers.get("X-Dv-Session")
-            or resp.headers.get("X-DV-Session")
-        )
-        new_session = header_session
-        session_source = "header" if header_session else None
-
         raw: dict[str, Any] | None = None
-        is_successful = False
+        is_successful = True
         orders: list[dict[str, Any]] = []
 
         try:
@@ -94,13 +106,15 @@ class DostavistaClient:
                 self._log.warning("Non-200 response: %s", resp.status_code)
 
         if raw and isinstance(raw, dict):
-            is_successful = bool(raw.get("is_successful"))
-            available = raw.get("available_objects") or {}
-            orders = list(available.get("orders") or [])
-            body_session = raw.get("session")
-            if isinstance(body_session, str) and body_session.strip():
-                new_session = body_session.strip()
-                session_source = "body"
+            is_successful = bool(raw.get("is_successful", True))
+            if resp.status_code == 200:
+                available = raw.get("available_objects") or {}
+                orders = list(available.get("orders") or [])
+
+        if resp.status_code in (401, 403):
+            is_successful = False
+
+        new_session, session_source = self._extract_session(resp, raw)
 
         return AvailableOrdersResponse(
             is_successful=is_successful,
@@ -134,16 +148,8 @@ class DostavistaClient:
             timeout=self._config.http_timeout_seconds,
         )
 
-        header_session = (
-            resp.headers.get("x-dv-session")
-            or resp.headers.get("X-Dv-Session")
-            or resp.headers.get("X-DV-Session")
-        )
-        new_session = header_session
-        session_source = "header" if header_session else None
-
         raw: dict[str, Any] | None = None
-        is_successful = False
+        is_successful = True
 
         try:
             raw_candidate = resp.json()
@@ -168,11 +174,12 @@ class DostavistaClient:
                 self._log.warning("Take-order non-200: %s", resp.status_code)
 
         if raw and isinstance(raw, dict):
-            is_successful = bool(raw.get("is_successful"))
-            body_session = raw.get("session")
-            if isinstance(body_session, str) and body_session.strip():
-                new_session = body_session.strip()
-                session_source = "body"
+            is_successful = bool(raw.get("is_successful", True))
+
+        if resp.status_code in (401, 403):
+            is_successful = False
+
+        new_session, session_source = self._extract_session(resp, raw)
 
         return TakeOrderResponse(
             is_successful=is_successful,

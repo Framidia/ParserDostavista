@@ -16,6 +16,7 @@ class AvailableOrdersResponse:
     new_session: str | None
     session_source: str | None
     status_code: int
+    error_text: str | None
     raw: dict[str, Any] | None
 
 
@@ -25,6 +26,7 @@ class TakeOrderResponse:
     new_session: str | None
     session_source: str | None
     status_code: int
+    error_text: str | None
     raw: dict[str, Any] | None
 
 
@@ -45,6 +47,31 @@ class DostavistaClient:
     @staticmethod
     def _is_valid_session(session: str | None) -> bool:
         return isinstance(session, str) and len(session) == 32
+
+    @staticmethod
+    def _extract_error_text(resp: requests.Response, raw: dict[str, Any] | None) -> str | None:
+        if raw and isinstance(raw, dict):
+            for key in ("message", "error", "error_message", "deny_reason", "detail"):
+                value = raw.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+            errors = raw.get("errors")
+            if isinstance(errors, list):
+                values = [str(item).strip() for item in errors if str(item).strip()]
+                if values:
+                    return "; ".join(values[:3])
+            if isinstance(errors, dict) and errors:
+                return str(errors)
+
+            parameter_errors = raw.get("parameter_errors")
+            if parameter_errors:
+                return str(parameter_errors)
+
+        text = resp.text.strip()
+        if text:
+            return " ".join(text.split())[:300]
+        return None
 
     def _extract_session(self, resp: requests.Response, raw: dict[str, Any] | None) -> tuple[str | None, str | None]:
         header_session = (
@@ -90,18 +117,11 @@ class DostavistaClient:
         except ValueError:
             raw = None
 
+        error_text = self._extract_error_text(resp, raw)
+
         if resp.status_code != 200:
-            if raw:
-                error_text = (
-                    raw.get("message")
-                    or raw.get("error")
-                    or raw.get("error_message")
-                    or raw.get("deny_reason")
-                )
-                if error_text:
-                    self._log.warning("Non-200 response: %s, error=%s", resp.status_code, error_text)
-                else:
-                    self._log.warning("Non-200 response: %s", resp.status_code)
+            if error_text:
+                self._log.warning("Non-200 response: %s, error=%s", resp.status_code, error_text)
             else:
                 self._log.warning("Non-200 response: %s", resp.status_code)
 
@@ -113,6 +133,11 @@ class DostavistaClient:
 
         if resp.status_code in (401, 403):
             is_successful = False
+        elif resp.status_code == 200 and not is_successful:
+            if error_text:
+                self._log.warning("API returned is_successful=false, error=%s", error_text)
+            else:
+                self._log.warning("API returned is_successful=false")
 
         new_session, session_source = self._extract_session(resp, raw)
 
@@ -122,6 +147,7 @@ class DostavistaClient:
             new_session=new_session,
             session_source=session_source,
             status_code=resp.status_code,
+            error_text=error_text,
             raw=raw,
         )
 
@@ -158,18 +184,11 @@ class DostavistaClient:
         except ValueError:
             raw = None
 
+        error_text = self._extract_error_text(resp, raw)
+
         if resp.status_code != 200:
-            if raw:
-                error_text = (
-                    raw.get("message")
-                    or raw.get("error")
-                    or raw.get("error_message")
-                    or raw.get("deny_reason")
-                )
-                if error_text:
-                    self._log.warning("Take-order non-200: %s, error=%s", resp.status_code, error_text)
-                else:
-                    self._log.warning("Take-order non-200: %s", resp.status_code)
+            if error_text:
+                self._log.warning("Take-order non-200: %s, error=%s", resp.status_code, error_text)
             else:
                 self._log.warning("Take-order non-200: %s", resp.status_code)
 
@@ -178,6 +197,11 @@ class DostavistaClient:
 
         if resp.status_code in (401, 403):
             is_successful = False
+        elif resp.status_code == 200 and not is_successful:
+            if error_text:
+                self._log.warning("Take-order returned is_successful=false, error=%s", error_text)
+            else:
+                self._log.warning("Take-order returned is_successful=false")
 
         new_session, session_source = self._extract_session(resp, raw)
 
@@ -186,5 +210,6 @@ class DostavistaClient:
             new_session=new_session,
             session_source=session_source,
             status_code=resp.status_code,
+            error_text=error_text,
             raw=raw,
         )

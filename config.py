@@ -29,6 +29,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value in {"1", "true", "yes", "y", "on"}
 
 
+def _env_int(name: str, default: int, required: bool = False) -> int:
+    raw = _env(name, str(default), required=required)
+    try:
+        return int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid integer for {name}: {raw}") from exc
+
+
 def _env_float_optional(name: str) -> float | None:
     raw = _env(name, None)
     if raw is None or raw == "":
@@ -55,6 +63,9 @@ class Config:
     max_distance_m: float
     http_timeout_seconds: float
     show_all_orders: bool
+    enable_healthcheck: bool
+    healthcheck_host: str
+    healthcheck_port: int
     courier_latitude: float | None
     courier_longitude: float | None
     telegram_bot_token: str
@@ -98,6 +109,9 @@ def load_config() -> Config:
         max_distance_m=_env_float("MAX_DISTANCE_M", 999999.0),
         http_timeout_seconds=_env_float("HTTP_TIMEOUT_SECONDS", 10.0),
         show_all_orders=_env_bool("SHOW_ALL_ORDERS", False),
+        enable_healthcheck=_env_bool("ENABLE_HEALTHCHECK", True),
+        healthcheck_host=_env("HEALTHCHECK_HOST", "127.0.0.1") or "127.0.0.1",
+        healthcheck_port=_env_int("HEALTHCHECK_PORT", 8081),
         courier_latitude=_env_float_optional("COURIER_LATITUDE"),
         courier_longitude=_env_float_optional("COURIER_LONGITUDE"),
         telegram_bot_token=_env("TELEGRAM_BOT_TOKEN", required=True) or "",

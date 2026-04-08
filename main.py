@@ -10,6 +10,7 @@ import requests
 
 from config import Config, load_config
 from dostavista_client import DostavistaClient
+from healthcheck import HealthState, start_healthcheck_server
 from storage import load_session, save_session
 from telegram_client import TelegramClient, build_yandex_maps_url
 
@@ -221,6 +222,36 @@ def order_passes_filters(order: dict[str, Any], config: Config) -> tuple[bool, f
     return True, price, distance_m
 
 
+def _format_error_suffix(error_text: str | None) -> str:
+    if not error_text:
+        return ""
+    return f", error={error_text}"
+
+
+def format_health_message(health_state: HealthState, config: Config) -> str:
+    snapshot = health_state.snapshot(config.poll_interval_seconds)
+    status_map = {
+        "ok": "OK",
+        "starting": "STARTING",
+        "stale": "STALE",
+    }
+    lines = [f"Статус: <b>{status_map.get(snapshot.status, snapshot.status.upper())}</b>"]
+    if snapshot.last_success_at:
+        lines.append(f"Последний успешный ответ: {html.escape(snapshot.last_success_at)}")
+    if snapshot.last_poll_started_at:
+        lines.append(f"Последний старт опроса: {html.escape(snapshot.last_poll_started_at)}")
+    if snapshot.seconds_since_success is not None:
+        lines.append(f"Секунд с последнего успеха: {snapshot.seconds_since_success:.1f}")
+    if snapshot.last_status_code is not None:
+        lines.append(f"Последний статус HTTP: {snapshot.last_status_code}")
+    if snapshot.last_orders_count is not None:
+        lines.append(f"Заказов в последнем успешном ответе: {snapshot.last_orders_count}")
+    lines.append(f"Подряд неудач: {snapshot.consecutive_failures}")
+    if snapshot.last_error:
+        lines.append(f"Последняя ошибка: {html.escape(snapshot.last_error)}")
+    return "\n".join(lines)
+
+
 def send_all_orders(telegram: TelegramClient, latest_orders: list[dict[str, Any]]) -> None:
     if not latest_orders:
         telegram.send_message("Список заказов пока пуст.")
@@ -261,12 +292,36 @@ def refresh_latest_orders(
         else:
             log.info("Session updated and cached")
 
-    if response.status_code in (401, 403) or not response.is_successful:
-        log.warning("Manual orders fetch failed (session invalid, status=%s)", response.status_code)
+    if response.status_code in (401, 403):
+        log.warning(
+            "Manual orders fetch failed (session invalid, status=%s%s)",
+            response.status_code,
+            _format_error_suffix(response.error_text),
+        )
+        return False
+
+    if response.status_code == 400:
+        log.warning(
+            "Manual orders fetch failed (bad request, status=%s%s)",
+            response.status_code,
+            _format_error_suffix(response.error_text),
+        )
+        return False
+
+    if not response.is_successful:
+        log.warning(
+            "Manual orders fetch failed (is_successful=false, status=%s%s)",
+            response.status_code,
+            _format_error_suffix(response.error_text),
+        )
         return False
 
     if response.status_code != 200:
-        log.warning("Manual orders fetch failed (status=%s)", response.status_code)
+        log.warning(
+            "Manual orders fetch failed (status=%s%s)",
+            response.status_code,
+            _format_error_suffix(response.error_text),
+        )
         return False
 
     latest_orders.clear()
@@ -278,6 +333,7 @@ def handle_telegram_updates(
     telegram: TelegramClient,
     client: DostavistaClient,
     config: Config,
+    health_state: HealthState,
     log: logging.Logger,
     last_offset: int,
     latest_orders: list[dict[str, Any]],
@@ -306,6 +362,12 @@ def handle_telegram_updates(
                 else:
                     send_all_orders(telegram, latest_orders)
                 continue
+            if command.startswith("/health"):
+                telegram.send_message(
+                    format_health_message(health_state, config),
+                    parse_mode="HTML",
+                )
+                continue
 
         callback = update.get("callback_query")
         if not isinstance(callback, dict):
@@ -324,6 +386,15 @@ def handle_telegram_updates(
                 )
             else:
                 send_all_orders(telegram, latest_orders)
+            continue
+
+        if data == "show_health":
+            if callback_id:
+                telegram.answer_callback_query(callback_id, "Показываю статус...")
+            telegram.send_message(
+                format_health_message(health_state, config),
+                parse_mode="HTML",
+            )
             continue
 
         if data.startswith("accept:"):
@@ -398,6 +469,7 @@ def main() -> None:
 
     client = DostavistaClient(config, session_value)
     telegram = TelegramClient(config)
+    health_state = HealthState()
 
     seen_orders: set[str] = set()
     last_session_alert_ts = 0.0
@@ -405,17 +477,36 @@ def main() -> None:
     latest_orders: list[dict[str, Any]] = []
 
     try:
-        telegram.set_commands([("orders", "Показать все заказы")])
+        telegram.set_commands(
+            [
+                ("orders", "Показать все заказы"),
+                ("health", "Проверить состояние сервиса"),
+            ]
+        )
     except requests.RequestException as exc:
         log.warning("Telegram set commands failed: %s", exc)
 
     try:
         telegram.send_message(
             "Панель управления",
-            extra_callback_button=("Показать все заказы", "show_all"),
+            extra_callback_buttons=[
+                ("Показать все заказы", "show_all"),
+                ("Статус сервиса", "show_health"),
+            ],
         )
     except requests.RequestException as exc:
         log.warning("Telegram control panel send failed: %s", exc)
+
+    if config.enable_healthcheck:
+        try:
+            start_healthcheck_server(
+                config.healthcheck_host,
+                config.healthcheck_port,
+                health_state,
+                config.poll_interval_seconds,
+            )
+        except OSError as exc:
+            log.warning("Health check start failed: %s", exc)
 
     log.info("Starting polling: interval=%.1fs", config.poll_interval_seconds)
 
@@ -426,10 +517,12 @@ def main() -> None:
                 telegram,
                 client,
                 config,
+                health_state,
                 log,
                 telegram_offset,
                 latest_orders,
             )
+            health_state.mark_poll_started()
             response = client.fetch_available_orders()
 
             if response.new_session and response.new_session != client.session_value:
@@ -440,8 +533,16 @@ def main() -> None:
                 else:
                     log.info("Session updated and cached")
 
-            if response.status_code in (401, 403) or not response.is_successful:
-                log.warning("Session invalid (status=%s)", response.status_code)
+            if response.status_code in (401, 403):
+                health_state.mark_failure(
+                    response.status_code,
+                    response.error_text or "session_invalid",
+                )
+                log.warning(
+                    "Session invalid (status=%s%s)",
+                    response.status_code,
+                    _format_error_suffix(response.error_text),
+                )
                 now = time.time()
                 if now - last_session_alert_ts > 60:
                     telegram.send_message(
@@ -451,9 +552,43 @@ def main() -> None:
                     last_session_alert_ts = now
                 continue
 
-            if response.status_code != 200:
+            if response.status_code == 400:
+                health_state.mark_failure(
+                    response.status_code,
+                    response.error_text or "bad_request",
+                )
+                log.warning(
+                    "Bad request (status=%s%s)",
+                    response.status_code,
+                    _format_error_suffix(response.error_text),
+                )
                 continue
 
+            if not response.is_successful:
+                health_state.mark_failure(
+                    response.status_code,
+                    response.error_text or "is_successful_false",
+                )
+                log.warning(
+                    "API returned is_successful=false (status=%s%s)",
+                    response.status_code,
+                    _format_error_suffix(response.error_text),
+                )
+                continue
+
+            if response.status_code != 200:
+                health_state.mark_failure(
+                    response.status_code,
+                    response.error_text or "request_failed",
+                )
+                log.warning(
+                    "Request failed (status=%s%s)",
+                    response.status_code,
+                    _format_error_suffix(response.error_text),
+                )
+                continue
+
+            health_state.mark_success(response.status_code, len(response.orders))
             latest_orders = response.orders
 
             for order in response.orders:
@@ -493,8 +628,10 @@ def main() -> None:
                 log.info("Sent order %s", order_id)
 
         except requests.RequestException as exc:
+            health_state.mark_failure(None, str(exc))
             log.warning("Request error: %s", exc)
         except Exception as exc:
+            health_state.mark_failure(None, str(exc))
             log.exception("Unexpected error: %s", exc)
         finally:
             elapsed = time.time() - cycle_start

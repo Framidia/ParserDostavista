@@ -59,6 +59,7 @@ class TelegramClient:
         button_url: str | None = None,
         accept_callback_data: str | None = None,
         extra_callback_button: tuple[str, str] | None = None,
+        extra_callback_buttons: list[tuple[str, str]] | None = None,
         parse_mode: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {
@@ -75,6 +76,9 @@ class TelegramClient:
         if extra_callback_button:
             button_text, callback_data = extra_callback_button
             keyboard.append([{"text": button_text, "callback_data": callback_data}])
+        if extra_callback_buttons:
+            for button_text, callback_data in extra_callback_buttons:
+                keyboard.append([{"text": button_text, "callback_data": callback_data}])
         if button_url:
             keyboard.append([{"text": "Открыть в Яндекс.Картах", "url": button_url}])
         if keyboard:
